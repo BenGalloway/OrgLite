@@ -1,0 +1,38 @@
+name: Build Windows .exe
+
+# Trigger manually (Actions tab -> "Run workflow") or on any v* tag push.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: tauri
+
+      # Builds OrgLite_0.1.0_x64-setup.exe (NSIS installer) + .msi and uploads
+      # them as build artifacts. See https://tauri.app/distribute/github-actions/
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: tauri
+          tagName: v__VERSION__
+          releaseName: "OrgLite v__VERSION__"
+          releaseBody: "OrgLite — org-flavored notes without Emacs. See below for what it is."
+          releaseDraft: true
+          prerelease: false

@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+dist/
+node_modules/
+*.exe
+*.msi
+
+# Tauri build outputs
+/tauri/target/
+/tauri/gen/schemas/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+.mypy_cache/
+
+# Sandbox / preview
+/uploads/

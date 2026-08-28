@@ -1,0 +1,175 @@
+
+<div id="app">
+  <!-- ============ HEADER ============ -->
+  <header>
+    <div class="brand"><span class="logo">◫</span>OrgLite<small>single-file org notes · no Emacs</small></div>
+    <div class="spacer"></div>
+    <button class="hbtn primary" id="btnSave" title="Save everything into this single HTML file (Ctrl+S)">💾 Save</button>
+    <button class="hbtn" id="btnNew" title="Create a new .org file">＋ New</button>
+    <button class="hbtn" id="btnLoad" title="Import an .org file from disk">📂 Load .org</button>
+    <input type="file" id="fileInput" accept=".org,.txt,.md,text/plain" style="display:none">
+    <button class="hbtn" id="btnStress" title="Generate a 100,000-line stress file to test performance">⚡ Stress 100k</button>
+    <button class="hbtn" id="btnDownload" title="Download the current file (Ctrl+S)">⬇ Save .org</button>
+    <button class="hbtn" id="btnUndo" disabled title="Undo last refile / checkbox action">↩ Undo</button>
+    <select id="themeSel" title="Theme">
+      <option value="dark">Theme: Dark</option>
+      <option value="light">Theme: Light</option>
+      <option value="solarized">Theme: Solarized</option>
+      <option value="nord">Theme: Nord</option>
+      <option value="gruvbox">Theme: Gruvbox</option>
+    </select>
+    <button class="hbtn" id="btnHelp" title="What is this?">?</button>
+  </header>
+
+  <!-- ============ BODY ============ -->
+  <div id="main">
+    <!-- sidebar -->
+    <aside id="sidebar">
+      <div class="sb-tabs">
+        <button class="sb-tab active" data-panel="pFiles">Files</button>
+        <button class="sb-tab" data-panel="pSearch">Search</button>
+        <button class="sb-tab" data-panel="pLinks">Backlinks</button>
+        <button class="sb-tab" data-panel="pGraph">Graph</button>
+      </div>
+      <div class="sb-panel active" id="pFiles">
+        <div id="filesList"></div>
+        <div class="foot-note">TiddlyWiki-style: the app <i>and</i> your notes live inside this one HTML file. Press <b>💾 Save</b> (Ctrl+S) to write changes back into the file — Chrome/Edge save in place, other browsers download an updated copy to replace the old file. Use <b>Load .org</b> / <b>Save .org</b> to exchange individual notes with Emacs or other tools.</div>
+      </div>
+      <div class="sb-panel" id="pSearch">
+        <div class="search-row"><input id="searchInput" placeholder="Search all files…" spellcheck="false"></div>
+        <div id="searchResults"></div>
+      </div>
+      <div class="sb-panel" id="pLinks">
+        <div id="linksList"><div class="empty-note">Select a heading to see what links to it.</div></div>
+      </div>
+      <div class="sb-panel" id="pGraph">
+        <div style="display:flex;gap:6px;margin-bottom:6px"><button class="hbtn" id="btnGraphRefresh" style="font-size:11px;padding:3px 9px">↻ Rebuild graph</button></div>
+        <svg id="graphSvg"></svg>
+        <div class="graph-legend">Nodes = headings with :ID: or links. Colors = files. Click a node to jump to it.</div>
+      </div>
+    </aside>
+
+    <!-- main column -->
+    <div id="mainCol">
+      <div class="main-toolbar">
+        <div class="fname" id="fname">—</div>
+        <div class="tb-spacer"></div>
+        <button class="hbtn" id="btnRefileCur" title="Refile the heading under the cursor (or press R)">⤵ Refile</button>
+        <button class="hbtn" id="btnFoldAll" style="font-size:11.5px;padding:3px 9px">Fold all</button>
+        <button class="hbtn" id="btnUnfoldAll" style="font-size:11.5px;padding:3px 9px">Unfold all</button>
+        <button class="hbtn" id="btnFocusPane" title="Toggle the preview pane (or press z)">◫ Preview</button>
+      </div>
+      <div id="contentWrap" class="focus">
+        <div id="bufferWrap">
+          <div id="bufferViewport"><div id="bufferRows"></div></div>
+          <div id="bufferSearch" class="hidden"><span class="srk">/</span><input id="bufferSearchInput" placeholder="search buffer…" spellcheck="false"><span id="bufferSearchInfo"></span></div>
+        </div>
+        <div id="paneHandle" title="Drag to resize the preview pane"></div>
+        <div id="focusPane">
+          <div id="focusScroll">
+            <div class="fp-crumb" id="fpCrumb"></div>
+            <div class="fp-title" id="fpTitle"></div>
+            <div id="fpTags"></div>
+            <div class="fp-meta" id="fpMeta"></div>
+            <div class="fp-actions">
+              <button id="fpRefile" title="Move this subtree to another file or heading — links survive because :ID: is preserved">⤵ Refile…</button>
+              <button id="fpCopyId" title="Copy this heading's :ID: to the clipboard">⧉ Copy ID</button>
+              <button id="fpJump" title="Move the cursor to this heading in the buffer">↳ Jump in buffer</button>
+            </div>
+            <div id="fpBody"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ STATUS BAR ============ -->
+  <div id="statusBar">
+    <span id="stMode" class="normal">NORMAL</span>
+    <span id="stSaved">💾 saved</span>
+    <span id="stFile">—</span><span class="sp"></span>
+    <span id="stPerf" class="perf"></span>
+    <span id="stStats"></span>
+  </div>
+</div>
+
+<!-- ============ REFILE MODAL ============ -->
+<div class="overlay" id="rfModal">
+  <div class="modal">
+    <h3>⤵ Refile subtree</h3>
+    <div class="mbody">
+      <div class="mrow"><label>Source</label><div id="rfSource" style="font-size:12.5px;padding:6px 9px;background:var(--panel2);border:1px solid var(--border);border-radius:7px"></div></div>
+      <div class="mrow"><label>Destination file</label><select id="rfFile"></select></div>
+      <div class="mrow"><label>Destination heading</label><select id="rfTarget"></select></div>
+      <div class="mrow"><label>Placement</label>
+        <div class="radio">
+          <label><input type="radio" name="rfmode" value="child" checked> as child of target</label>
+          <label><input type="radio" name="rfmode" value="after"> as sibling after target</label>
+        </div>
+      </div>
+      <div class="empty-note" style="font-size:11.5px">The subtree keeps its <code>:ID:</code>, so <code>[[id:…]]</code> backlinks across files keep resolving after the move — org-roam's core trick.</div>
+    </div>
+    <div class="mfoot">
+      <button class="hbtn" id="rfCancel">Cancel</button>
+      <button class="hbtn primary" id="rfConfirm">Refile</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ HELP MODAL ============ -->
+<div class="overlay" id="helpModal">
+  <div class="modal">
+    <h3>◫ OrgLite — prototype</h3>
+    <div class="mbody">
+      <p>One HTML file that is the whole app: <b>org-flavored plain-text notes with org-roam-style nodes &amp; backlinks, zero Emacs, instant even at 100k+ lines</b> — and, TiddlyWiki-style, the app and all your notes live inside the file itself.</p>
+      <h4>Editing — one rendered buffer, Emacs/org style</h4>
+      <ul>
+        <li>The whole main area is <b>one buffer</b>: fully rendered (org-modern-style bullets, TODO pills, ☐/☑ checkboxes, timestamps, tags) <i>and</i> the editor — no source/view toggle.</li>
+        <li>Modal keys: <span class="kbd">j</span>/<span class="kbd">k</span> down/up · <span class="kbd">h</span>/<span class="kbd">l</span> left/right · <span class="kbd">i</span> insert at cursor · <span class="kbd">a</span> append · <span class="kbd">A</span> end of line · <span class="kbd">o</span>/<span class="kbd">O</span> new line below/above · <span class="kbd">Esc</span> back to normal.</li>
+        <li>In insert mode: <span class="kbd">Enter</span> keeps the same level &amp; item (splits at the cursor; on a heading the rest becomes a same-level heading, at the end of a heading it indents a body line under it; on a list item it continues the list) · <span class="kbd">Shift+Enter</span> places the same item one indent deeper · <span class="kbd">Ctrl+Enter</span> inserts a heading one level deeper than the current one · <span class="kbd">Ctrl+Shift+Enter</span> inserts a heading at the level of the most previous heading · <span class="kbd">Tab</span> inserts indentation · <span class="kbd">Ctrl+&gt;</span>/<span class="kbd">Ctrl+&lt;</span> indent/dedent the current line (CAPS-as-Ctrl friendly) · <span class="kbd">Backspace</span> at line start joins lines · arrows move across lines. Typing edits the <i>raw</i> org text, and the pretty view re-renders <b>live as you type</b> — close a <code>*bold*</code> and it turns bold, type a heading and its TODO pill and tags appear immediately. Headings can nest to <b>any</b> depth — <code>****** …</code> works, there is no three-level limit</li>
+        <li><span class="kbd">Tab</span> cycles fold (open → children → folded) · <span class="kbd">S-Tab</span> fold all · <span class="kbd">t</span> cycle TODO state · <span class="kbd">space</span> toggle checkbox · <span class="kbd">x</span> delete char · <span class="kbd">u</span> undo.</li><li>Plain lists render org-modern style too: <code>-</code> and <code>+</code> become • bullets, <code>1.</code> numbered items get accent-colored numbers — raw text underneath stays untouched
+        <li><span class="kbd">Ctrl+&gt;</span>/<span class="kbd">Ctrl+&lt;</span> in normal mode <b>demote/promote the whole subtree</b> under the cursor (org-metaright / org-metaleft) · <span class="kbd">0</span> <span class="kbd">^</span> <span class="kbd">$</span> line edges · <span class="kbd">gg</span>/<span class="kbd">G</span> top/bottom · <span class="kbd">Ctrl-f/b</span> pages · <span class="kbd">/</span> search buffer · <span class="kbd">n</span>/<span class="kbd">N</span> next/prev match · <span class="kbd">R</span> refile subtree · <span class="kbd">z</span> toggle preview pane</li>
+      </ul>
+      <h4>Saving (TiddlyWiki-style)</h4>
+      <ul>
+        <li><b>💾 Save / Ctrl+S</b> — writes everything into the HTML file. Chrome/Edge: pick the file once, then saves go in place. Firefox/Safari: an updated copy downloads — replace your old file with it.</li>
+        <li><b>Crash recovery</b> — while you work, unsaved changes are mirrored to browser storage and restored automatically if you reopen without saving.</li>
+        <li><b>Portability</b> — <b>Load .org</b> / <b>Save .org</b> export individual notes as plain text, so no file is ever hostage to this app.</li>
+      </ul>
+      <h4>Try it</h4>
+      <ul>
+        <li><b>Fold / unfold</b> — put the cursor on a heading and press <span class="kbd">Tab</span> to cycle open → children-only → folded (works even on the 100k-line stress file — rendering is virtualized).</li>
+        <li><b>Refile a subtree</b> — <span class="kbd">R</span> (or ⤵ Refile). Move a whole subtree to another file or heading. The <code>:ID:</code> travels with it, so backlinks keep working.</li>
+        <li><b>Preview pane</b> — shows the whole subtree under the cursor, narrowed like org: every subheading with the text under it, refreshing as the cursor moves (click a subheading to jump; click a checkbox to toggle). <b>Drag the divider</b> to resize it, or <span class="kbd">z</span> to hide it.</li>
+        <li><b>Backlinks</b> — the tab shows linked references (<code>[[id:…]]</code>) and unlinked mentions of the selected heading.</li><li><b>Graph</b> — nodes &amp; edges derived from the link index</li>
+        <li><b>Themes</b> — instant, CSS-variable-driven. UTF-8 headings/tags just work.</li>
+        <li><b>⚡ Stress 100k</b> — generates a 100,000-line file and shows the parse time.</li>
+      </ul>
+      <h4>How the single file works</h4>
+      <ul>
+        <li>Everything — markup, CSS, app code and your notes — is stored as JSON in a hidden <code>&lt;script&gt;</code> "store" inside the file, and a tiny boot script renders it (the same architecture as TiddlyWiki).</li>
+        <li>All <code>&lt;</code>, <code>&gt;</code> and <code>&amp;</code> in the store are escaped, so the file survives any HTML round-trip without corruption.</li>
+        <li>A Tauri 2 shell (Rust, ~10 MB binary) can host this same file later for a windowed app that saves in place on disk — same file, no changes.</li>
+      </ul>
+      <p style="margin-top:10px;font-size:12px;color:var(--muted)">Notes: in the sandboxed preview, save/download/clipboard may be blocked — open the HTML file directly in your browser for full behavior.</p>
+    </div>
+    <div class="mfoot"><button class="hbtn primary" id="helpClose">Got it</button></div>
+  </div>
+</div>
+
+<div id="toastHost"></div>
+
+<!-- ============ NEW FILE MODAL ============ -->
+<div class="overlay" id="newfileModal">
+  <div class="modal" style="width:380px">
+    <h3>＋ New .org file</h3>
+    <div class="mbody">
+      <div class="mrow"><label>File name</label><input id="nfName" style="width:100%" spellcheck="false"></div>
+    </div>
+    <div class="mfoot">
+      <button class="hbtn" id="nfCancel">Cancel</button>
+      <button class="hbtn primary" id="nfCreate">Create</button>
+    </div>
+  </div>
+</div>
+

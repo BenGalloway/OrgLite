@@ -6,11 +6,12 @@
 const now = () => (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-const KW_SET = ['TODO','DONE','NEXT','WAITING','HOLD','CANCELLED','INPROGRESS'];
+const KW_SET = ['TODO','NEXT','STRT','PROJ','WAIT','WAITING','HOLD','IDEA','DONE','CANCELLED','KILL','NO'];
 
 const HEAD_RE = /^(\s*)(\*+)\s+(.*)$/; // leading whitespace allowed (org semantics)
 const TAG_RE  = /^(.*?)\s+(:[A-Za-z0-9_@#%]+(?::[A-Za-z0-9_@#%]+)*:)\s*$/;
 const KW_RE   = new RegExp('^('+KW_SET.join('|')+')\\s+(.+)$');
+const PRIO_RE = /^\[#([ABC])\]\s+(.+)$/;
 const PROP_RE = /^:([A-Za-z0-9_]+):\s*(.*)$/;
 const LINK_RE = /\[\[([^\[\]]+?)\](\[([^\[\]]*)\])?\]/g;
 const CB_RE   = /^\[([ X-])\]\s*(.*)$/;
@@ -51,9 +52,12 @@ function parseOrg(content){
         let todo = null;
         const km = KW_RE.exec(title);
         if (km){ todo = km[1]; title = km[2]; }
+        let priority = null;
+        const pm2 = PRIO_RE.exec(title);
+        if (pm2){ priority = pm2[1]; title = pm2[2]; }
         while (stack.length > 1 && stack[stack.length-1].level >= level) stack.pop();
         const parent = stack[stack.length-1];
-        const h = {id:null, level, title, tags, todo, props:{}, children:[], parent,
+        const h = {id:null, level, title, tags, todo, priority, props:{}, children:[], parent,
                    startLine:i, endLine:i, key:null};
         parent.children.push(h); headings.push(h); stack.push(h);
         curHead = h; inProps = false; curProps = null;
@@ -98,7 +102,7 @@ function parseOrg(content){
   }
   while (open.length) open.pop().endLine = n - 1;
   // stable keys for fold-state carry-over
-  for (const h of headings) h.key = h.props.ID || (h.level + ':' + h.title.toLowerCase());
+  for (const h of headings) h.key = h.props.ID || (h.level + ':' + (h.todo||'') + ':' + (h.priority||'') + ':' + h.title.toLowerCase());
   // line -> deepest heading containing it
   const lineHead = new Array(n).fill(null);
   for (const h of headings){
@@ -204,131 +208,10 @@ function genStressContent(){
    ===================================================================== */
 function seedFiles(){
   return [
-    {name:'inbox.org', content:[
-      '#+TITLE: Inbox',
-      '#+FILETAGS: :inbox:',
-      '',
-      '* TODO Review orglite prototype          :inbox:review:',
-      '  SCHEDULED: <2026-08-25 Tue>',
-      '  - [ ] Check performance with the 100k stress file',
-      '  - [ ] Try refiling "Research: Zettelkasten" into projects.org',
-      '  - [X] Compare [[id:note-big-picture][the big picture note]]',
-      '',
-      '* NEXT Reply to newsletter                :admin:',
-      '  DEADLINE: <2026-08-28 Fri>',
-      '  Draft is mostly done. Mention [[id:note-tauri][Tauri shell]] plans.',
-      '',
-      '* 日本語のメモ                            :japanese:',
-      '  タグや見出しもUTF-8で問題なく扱えます。',
-      '  - [ ] 漢字のノートを整理する',
-      '',
-      '* Waiting on feedback                     :waiting:',
-      '  Waiting for the team review of [[org-in-2026]].',
-      ''
-    ].join('\n')},
-    {name:'projects.org', content:[
-      '#+TITLE: Projects',
-      '',
-      '* Project Aurora                        :project:work:',
-      '  :PROPERTIES:',
-      '  :ID: proj-aurora',
-      '  :END:',
-      '  A flagship project. See the big picture note for context.',
-      '  ** TODO Phase 1: Research',
-      '     - [ ] Interview users',
-      '     - [X] Competitive scan',
-      '     - [ ] Write findings into [[id:note-org-in-2026][org-in-2026]]',
-      '  ** DONE Phase 0: Kickoff',
-      '     CLOSED: [2026-07-01 Wed]',
-      '',
-      '* Project Banshee                       :project:research:',
-      '  :PROPERTIES:',
-      '  :ID: proj-banshee',
-      '  :END:',
-      '  ** TODO Build the indexer',
-      '     Refiling this subtree keeps links intact because of :ID:.',
-      ''
-    ].join('\n')},
-    {name:'notes/big-picture.org', content:[
-      '#+TITLE: Big Picture',
-      '#+FILETAGS: :notes:',
-      '',
-      '* The big picture                       :vision:',
-      '  :PROPERTIES:',
-      '  :ID: note-big-picture',
-      '  :END:',
-      '  Org-flavored plain text is the *source of truth*. A fast shell',
-      '  should /never/ rewrite your files, only =index= them.',
-      '',
-      '  ** Why files beat databases',
-      '     - [X] Files are portable: git, grep, sync, Emacs',
-      '     - [X] No lock-in — the Logseq 2.0 lesson',
-      '     - [ ] A derived SQLite cache (org-roam style) is enough',
-      '',
-      '  ** Related',
-      '     - [[id:note-tauri][Tauri shell]] — the lightweight container',
-      '     - [[id:note-org-in-2026][Org in 2026]] — where the ecosystem stands',
-      '     - [[proj-aurora][Project Aurora]] — a consumer of this note',
-      ''
-    ].join('\n')},
-    {name:'notes/org-in-2026.org', content:[
-      '#+TITLE: Org in 2026',
-      '#+FILETAGS: :notes:',
-      '',
-      '* Org in 2026                           :org:emacs:ecosystem:',
-      '  :PROPERTIES:',
-      '  :ID: note-org-in-2026',
-      '  :END:',
-      '  Emacs remains the reference implementation, but a whole ecosystem',
-      '  now implements org *without* Emacs: Logseq, Orgzly, organice, Beorg.',
-      '  Most of them parse a pragmatic /subset/ — the long tail of export',
-      '  blocks and Babel is rarely worth chasing.',
-      '',
-      '  ** Überblick: why this matters',
-      '     If the files stay plain and portable, the app is disposable.',
-      '     That is the property to protect at all costs.',
-      '',
-      '  ** Mentions',
-      '     The big picture note lives at [[id:note-big-picture][Big Picture]].',
-      ''
-    ].join('\n')},
-    {name:'notes/tauri-shell.org', content:[
-      '#+TITLE: Tauri Shell',
-      '#+FILETAGS: :notes:',
-      '',
-      '* Tauri shell                           :stack:rust:',
-      '  :PROPERTIES:',
-      '  :ID: note-tauri',
-      '  :END:',
-      '  Rust core + webview UI: ~10 MB binary, rope-backed editor,',
-      '  tree-sitter parsing, SQLite index. This HTML prototype is the',
-      '  exact UI that the shell would host.',
-      '',
-      '  ** Why not Electron',
-      '     Electron ships a whole browser; Tauri reuses the OS webview.',
-      '     The big picture is: files first, always.',
-      '     For a file that never exceeds a few MB, memory and startup',
-      '     time are the difference between "snappy" and "laggy".',
-      ''
-    ].join('\n')},
-    {name:'index.org', content:[
-      '#+TITLE: Index',
-      '#+FILETAGS: :moc:',
-      '',
-      '* Knowledge base                        :moc:',
-      '  - [[id:note-big-picture][Big Picture]]',
-      '  - [[id:note-org-in-2026][Org in 2026]]',
-      '  - [[id:note-tauri][Tauri Shell]]',
-      '  - [[proj-aurora][Project Aurora]]',
-      '  - [[proj-banshee][Project Banshee]]',
-      '',
-      '* TODO Read through the inbox           :inbox:review:',
-      '  - [ ] Process [[inbox][Inbox]] items',
-      ''
-    ].join('\n')}
+    {name:'notes.org', content:
+      '#+TITLE: Notes\n\n* Welcome\nWrite org-flavored notes here.\n- [ ] a task to try checkbox toggling\n- [ ] refile this file\'s heading into another file\n'}
   ];
 }
-
 /* =====================================================================
    UI layer
    ===================================================================== */
@@ -575,7 +458,7 @@ function scanPretty(raw){
         i = j + 1; continue;
       }
     }
-    // link [[target][desc]]
+    // link [[target][desc]] or [[target]]
     if (c === '[' && raw.startsWith('[[', i)){
       const close = raw.indexOf(']]', i + 2);
       if (close !== -1){
@@ -585,12 +468,16 @@ function scanPretty(raw){
         const desc = br === -1 ? '' : inner.slice(br + 2);
         flush();
         segs.push(mkSeg('[[', 'lb'));
-        segs.push(mkSeg(target + (br !== -1 ? '][' : ''), 'lt'));
-        const dsegs = desc ? scanPretty(desc) : [];
-        const descHtml = dsegs.map(s => s.html).join('');
-        const descRaw = desc || target;
-        segs.push({html:'<a class="xlink" data-target="' + esc(target) + '">' + (descHtml || esc(target)) + '</a>',
-                   raw: descRaw, w: descRaw.length * W});
+        if (desc){
+          segs.push(mkSeg(target + '][', 'lt'));
+          const dsegs = scanPretty(desc);
+          const descHtml = dsegs.map(s => s.html).join('');
+          segs.push({html:'<a class="xlink" data-target="' + esc(target) + '">' + (descHtml || esc(desc)) + '</a>',
+                     raw: desc, w: desc.length * W});
+        } else {
+          segs.push({html:'<a class="xlink" data-target="' + esc(target) + '">' + esc(target) + '</a>',
+                     raw: target, w: target.length * W});
+        }
         segs.push(mkSeg(']]', 'rb'));
         i = close + 2; continue;
       }
@@ -629,11 +516,21 @@ function linePrettyHtml(raw){
       if (spTxt) segs.push({html: esc(spTxt), raw: spTxt, w: spTxt.length * W});
       tail = rest.slice(kwm.m.index + kwm.m[0].length);
     }
-    const tm = /^(.*?)(\s+)(:[A-Za-z0-9_@#%]+(?::[A-Za-z0-9_@#%]+)*:)\s*$/.exec(tail);
-    let titlePart = tail, tagPart = '';
-    if (tm){ titlePart = tm[1]; tagPart = tm[3]; }
+    const prm = /^(\[#([ABC])\])(\s+)/.exec(tail);
+    if (prm){
+      segs.push({html:'<span class="prio ' + prm[2] + '">' + esc(prm[1]) + '</span>', raw: prm[1], w: prm[1].length * W});
+      segs.push({html: esc(prm[3]), raw: prm[3], w: prm[3].length * W});
+      tail = tail.slice(prm[0].length);
+    }
+    const tm = /^(.*?)(\s+)(:[A-Za-z0-9_@#%]+(?::[A-Za-z0-9_@#%]+)*:)(\s*)$/.exec(tail);
+    let titlePart = tail, tagSep = '', tagPart = '', tagTrail = '';
+    if (tm){ titlePart = tm[1]; tagSep = tm[2]; tagPart = tm[3]; tagTrail = tm[4] || ''; }
     for (const s of scanPretty(titlePart)) segs.push(s);
-    if (tagPart) segs.push({html: '<span class="tagpill">' + esc(tagPart) + '</span>', raw: tagPart, w: tagPart.length * W});
+    if (tagPart){
+      segs.push({html: esc(tagSep), raw: tagSep, w: tagSep.length * W});
+      segs.push({html: '<span class="tagpill">' + esc(tagPart) + '</span>', raw: tagPart, w: tagPart.length * W});
+    }
+    if (tagTrail) segs.push({html: esc(tagTrail), raw: tagTrail, w: tagTrail.length * W});
     return segs.map(s => s.html).join('');
   }
   return bodySegs(raw).map(s => s.html).join('');
@@ -650,8 +547,7 @@ function headingSegs(h, raw){
   let rest = raw.slice(leadWs.length + stars.length);
   // leading whitespace
   const ws = /^(\s+)/.exec(rest);
-  let wsLen = 0;
-  if (ws){ wsLen = ws[1].length; segs.push({html: esc(ws[1]), raw: ws[1], w: ws[1].length * W}); rest = rest.slice(wsLen); }
+  if (ws){ segs.push({html: esc(ws[1]), raw: ws[1], w: ws[1].length * W}); rest = rest.slice(ws[1].length); }
   // TODO keyword
   if (h.todo){
     const km = new RegExp('^(' + escRe(h.todo) + ')(\\s+)').exec(rest);
@@ -662,14 +558,30 @@ function headingSegs(h, raw){
       rest = rest.slice(km[0].length);
     }
   }
+  // priority cookie
+  if (h.priority){
+    const pm = new RegExp('^(\\[#' + escRe(h.priority) + '\\])(\\s+)').exec(rest);
+    if (pm){
+      segs.push({html:'<span class="prio ' + h.priority + '">[#' + esc(h.priority) + ']</span>', raw: pm[1], w: pm[1].length * W});
+      segs.push({html: esc(pm[2]), raw: pm[2], w: pm[2].length * W});
+      rest = rest.slice(pm[0].length);
+    }
+  }
   // tags at end
-  let tagRaw = '';
-  if (h.tags && h.tags.length) tagRaw = ':' + h.tags.join(':') + ':';
   let titlePart = rest;
-  if (tagRaw && rest.endsWith(tagRaw)) titlePart = rest.slice(0, rest.length - tagRaw.length);
-  for (const s of scanPretty(titlePart)) segs.push(s);
-  if (tagRaw && rest.endsWith(tagRaw)){
-    segs.push({html:'<span class="tagpill">' + esc(tagRaw) + '</span>', raw: tagRaw, w: tagRaw.length * W});
+  if (h.tags && h.tags.length){
+    const ttm = /^(.*?)(\s+)(:[A-Za-z0-9_@#%]+(?::[A-Za-z0-9_@#%]+)*:)(\s*)$/.exec(rest);
+    if (ttm){
+      titlePart = ttm[1];
+      segs.push(...scanPretty(titlePart));
+      segs.push({html: esc(ttm[2]), raw: ttm[2], w: ttm[2].length * W});
+      segs.push({html:'<span class="tagpill">' + esc(ttm[3]) + '</span>', raw: ttm[3], w: ttm[3].length * W});
+      if (ttm[4]) segs.push({html: esc(ttm[4]), raw: ttm[4], w: ttm[4].length * W});
+    } else {
+      segs.push(...scanPretty(titlePart));
+    }
+  } else {
+    segs.push(...scanPretty(titlePart));
   }
   return segs;
 }
@@ -700,6 +612,17 @@ function bodySegs(raw){
     else segs.push({html: '<span class="olnum">' + esc(bullet) + '</span>', raw: bullet, w: bullet.length * W});
     if (sp1) segs.push({html: esc(sp1), raw: sp1, w: sp1.length * W});
     for (const s of scanPretty(rest)) segs.push(s);
+    return segs;
+  }
+  // planning lines: SCHEDULED/DEADLINE/CLOSED
+  const plm = /^(\s*)(SCHEDULED|DEADLINE|CLOSED):(\s*)(.*)$/.exec(raw);
+  if (plm){
+    const segs = [];
+    if (plm[1]) segs.push({html: esc(plm[1]), raw: plm[1], w: plm[1].length * W});
+    const key = plm[2] + ':';
+    segs.push({html:'<span class="plan-key">' + esc(key) + '</span>', raw: key, w: key.length * W});
+    if (plm[3]) segs.push({html: esc(plm[3]), raw: plm[3], w: plm[3].length * W});
+    for (const s of scanPretty(plm[4])) segs.push(s);
     return segs;
   }
   return scanPretty(raw);
@@ -735,15 +658,20 @@ function rowHtml(row){
     return {html: '<span class="fld">… ' + row.hidden + ' line' + (row.hidden === 1 ? '' : 's') + ' hidden — Tab to open</span>', segs: [], cls: cls + ' fold'};
   }
   if (row.h){
-    cls += ' head';
+    cls += ' head h' + Math.min(row.h.level, 6);
+    if (row.h.todo === 'DONE' || row.h.todo === 'CANCELLED' || row.h.todo === 'KILL' || row.h.todo === 'NO') cls += ' done-head';
     segs = headingSegs(row.h, raw);
   } else {
     segs = bodySegs(raw);
     const t = raw.trim();
     if (/^:PROPERTIES:$/.test(t) || /^:END:$/.test(t) || /^:ID:/.test(t) || /^:[A-Za-z0-9_]+:/.test(t)){
-      cls += ' dim';
+      cls += ' drawer';
     } else if (/^(SCHEDULED|DEADLINE|CLOSED):/.test(t)){
-      cls += ' chip';
+      cls += ' plan';
+    } else if (/^#\+(BEGIN|END)_/i.test(t)){
+      cls += ' src-keyword';
+    } else if (/^#\+/.test(t)){
+      cls += ' dim';
     } else if (raw.trim() === ''){
       cls += ' blank';
     }
@@ -786,8 +714,9 @@ function paintBuffer(){
     const row = rows[i];
     const r = rowHtml(row);
     const div = document.createElement('div');
+    const doneKw = row.h && (row.h.todo === 'DONE' || row.h.todo === 'CANCELLED' || row.h.todo === 'KILL' || row.h.todo === 'NO');
     div.className = r.cls + (i === curVi ? curCls : '') +
-                    (row.h && row.h.todo === 'DONE' ? ' done' : '') +
+                    (doneKw ? ' done' : '') +
                     (row.h ? '' : (/^(\s*)([-+*]|\d+[.)])\s+\[X\]/.test(currentFile().parsed.lines[row.no]) ? ' cb-on' : /^(\s*)([-+*]|\d+[.)])\s+\[-\]/.test(currentFile().parsed.lines[row.no]) ? ' cb-prog' : ''));
     div.style.top = (i * ROWH) + 'px';
     div.style.paddingLeft = row.h ? (10 + (row.h.level - 1) * 18) + 'px' : '10px';
@@ -1258,11 +1187,11 @@ function cycleTodo(){
   const f = currentFile();
   const h = headingAtCursor();
   if (!h) return;
-  const order = ['TODO','NEXT','DONE',''];
+  const order = ['TODO','NEXT','STRT','WAIT','DONE',''];
   const idx = order.indexOf(h.todo || '');
   const next = h.todo ? order[(idx + 1) % order.length] : 'TODO';
   const raw = f.parsed.lines[h.startLine];
-  const m = /^(\*+)(\s+)(.*)$/.exec(raw);
+  const m = /^(\s*\*+)(\s+)(.*)$/.exec(raw);
   if (!m) return;
   let rest = m[3];
   if (h.todo) rest = rest.replace(new RegExp('^' + escRe(h.todo) + '\\s+'), '');
@@ -1273,7 +1202,7 @@ function cycleTodo(){
   persist();
   renderAll();
   setCursor(viForLine(h.startLine), Math.min(state.cur.col, newRaw.length));
-  toast(next ? '“' + h.title + '” → ' + next : '“' + h.title + '” → no TODO keyword');
+  toast(next ? '"' + h.title + '" → ' + next : '"' + h.title + '" → no TODO keyword');
 }
 function toggleCheckboxAtCursor(){
   const f = currentFile();
@@ -1474,7 +1403,7 @@ function renderFocusPane(f, h){
   crumb.innerHTML = crumbs(h).map((t,i,a) =>
     i === a.length-1 ? '<b>' + esc(t) + '</b>' : esc(t) + '<span class="sep">›</span>').join('');
   crumb.prepend(esc(f.name) + ' <span class="sep">›</span> ');
-  $('fpTitle').innerHTML = (h.todo ? '<span class="fp-kw ' + h.todo + '">' + h.todo + '</span>' : '') + renderInline(h.title);
+  $('fpTitle').innerHTML = (h.todo ? '<span class="fp-kw ' + h.todo + '">' + h.todo + '</span>' : '') + (h.priority ? '<span class="fp-kw prio ' + h.priority + '">[#' + h.priority + ']</span> ' : '') + renderInline(h.title);
   $('fpTags').innerHTML = h.tags.map(t => '<span class="fp-tag">' + esc(t) + '</span>').join('');
   const lvl = $('fpMeta');
   lvl.innerHTML = '';
@@ -1500,6 +1429,7 @@ function renderFocusPane(f, h){
     hb.style.paddingLeft = (Math.min(depth, 10) * 14) + 'px';
     hb.innerHTML = '<span class="fp-stars">•</span> ' +
       (node.todo ? '<span class="fp-kw ' + node.todo + '">' + esc(node.todo) + '</span> ' : '') +
+      (node.priority ? '<span class="fp-kw prio ' + node.priority + '">[#' + node.priority + ']</span> ' : '') +
       renderInline(node.title) +
       node.tags.map(t => '<span class="fp-tag">' + esc(t) + '</span>').join('');
     hb.title = 'Jump to \u201c' + node.title + '\u201d';

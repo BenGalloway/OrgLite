@@ -69,11 +69,19 @@ function parseOrg(content){
       const t = line.trimStart();
       if (t.charCodeAt(0) === 58){
         if (inProps){
-          if (/^:END:\s*$/.test(t)){ inProps = false; curHead.props = curProps || {}; curProps = null; }
+          if (/^:END:\s*$/.test(t)){
+            inProps = false;
+            if (curHead){ curHead.props = curProps || {}; curHead.propsEndLine = i; }
+            curProps = null;
+          }
           else { const pm = PROP_RE.exec(t); if (pm) (curProps || (curProps = {}))[pm[1]] = pm[2]; }
           continue;
         }
-        if (/^:PROPERTIES:\s*$/.test(t)){ inProps = true; curProps = {}; continue; }
+        if (/^:PROPERTIES:\s*$/.test(t)){
+          inProps = true; curProps = {};
+          if (curHead && curHead.propsStartLine == null) curHead.propsStartLine = i;
+          continue;
+        }
         if (/^(SCHEDULED|DEADLINE|CLOSED):/.test(t)) continue;
       }
     }
@@ -220,6 +228,9 @@ const state = {
   files: [],            // {name, content, parsed}
   current: 0,
   folds: {},            // "file::key" -> 0 open | 1 children-only | 2 folded
+  drawerFolds: {},      // "file::key::props" -> 1 folded | 0 open
+  keys: null,           // command -> key spec string (customizable)
+  capturing: null,      // command currently capturing a key in Options
   sel: null,            // {fileIdx, key}
   index: null,
   rows: [],
@@ -235,6 +246,11 @@ const state = {
   undo: [],             // {label, items:[{f, prev}]}
   searchQ: '',
   gg: false,
+  seq: null,            // pending multi-key binding, e.g. "o a"
+  seqTimer: null,
+  slash: null,          // insert-mode slash command {q, il}
+  datePick: null,       // slash-command date picker {kind, il, literal, date}
+  agenda: {week: null, sel: 0, rows: []},
   pan: null,
 };
 const ROWH = 26, BUFFER = 30;
@@ -346,6 +362,8 @@ function bindLinks(root){
 /* ---------- fold state ---------- */
 function getFold(f, h){ return state.folds[f.name + '::' + h.key] || 0; }
 function setFold(f, h, v){ state.folds[f.name + '::' + h.key] = v; }
+function getDrawerFold(f, h){ return state.drawerFolds[f.name + '::' + h.key + '::props'] || 0; }
+function setDrawerFold(f, h, v){ state.drawerFolds[f.name + '::' + h.key + '::props'] = v; }
 
 /* =====================================================================
    RENDERED BUFFER — one buffer that is both editor and viewer.
@@ -391,7 +409,9 @@ function scanPretty(raw){
   const flush = () => { text(buf); buf = ''; };
   while (i < n){
     const c = raw[i], next = raw[i+1];
-    if (c === '\\'){ buf += (i + 1 < n) ? raw[i+1] : ''; i += 2; continue; }
+    // org uses \\ as an escape marker; keep it visible so typing a backslash
+    // (paths, LaTeX, regexes) never deletes it from the raw line.
+    if (c === '\\'){ buf += (i + 1 < n) ? ('\\' + raw[i+1]) : '\\'; i += (i + 1 < n) ? 2 : 1; continue; }
     // bold *x*
     if (c === '*' && next && next !== '*' && next !== ' '){
       const j = findClose(raw, i+1, '*');
@@ -486,7 +506,7 @@ function scanPretty(raw){
     const tm = /^<(\d{4}-\d{2}-\d{2}[^>]*)>/.exec(raw.slice(i));
     if (tm){
       flush();
-      segs.push({html:'<span class="ts">' + esc(tm[1]) + '</span>', raw: tm[1], w: tm[1].length * W});
+      segs.push({html:'<span class="ts">' + esc(tm[0]) + '</span>', raw: tm[0], w: tm[0].length * W});
       i += tm[0].length; continue;
     }
     buf += c; i++;
@@ -630,13 +650,25 @@ function bodySegs(raw){
 
 function buildVisRows(f){
   const out = [];
-  const pushBody = (a, b) => { for (let i = a; i <= b; i++) out.push({no: i, h: null, foldMark: false, hidden: 0}); };
+  const bodyRow = i => ({no: i, h: null, foldMark: false, hidden: 0});
+  const pushBody = (a, b) => { for (let i = a; i <= b; i++) out.push(bodyRow(i)); };
+  const pushHeadingBody = (a, b, h) => {
+    const ps = h && h.propsStartLine, pe = h && h.propsEndLine;
+    if (ps == null || pe == null || ps < a || pe > b){ pushBody(a, b); return; }
+    for (let i = a; i < ps; i++) out.push(bodyRow(i));
+    if (getDrawerFold(f, h)){
+      out.push({no: ps, h: null, foldMark: true, hidden: pe - ps, drawer: true, drawerFor: h});
+    } else {
+      for (let i = ps; i <= pe; i++) out.push(bodyRow(i));
+    }
+    for (let i = pe + 1; i <= b; i++) out.push(bodyRow(i));
+  };
   const visit = (h, hideChildren) => {
     out.push({no: h.startLine, h, foldMark: false, hidden: 0});
     const st = getFold(f, h);
     if (st === 2){ out.push({no: h.startLine, h, foldMark: true, hidden: h.endLine - h.startLine}); return; }
     const firstChild = h.children.length ? h.children[0].startLine : h.endLine + 1;
-    pushBody(h.startLine + 1, firstChild - 1);
+    pushHeadingBody(h.startLine + 1, firstChild - 1, h);
     for (const c of h.children) visit(c, hideChildren || st === 1);
   };
   const heads = f.parsed.headings;
@@ -655,7 +687,8 @@ function rowHtml(row){
   const raw = f.parsed.lines[row.no];
   let segs, cls = 'bl';
   if (row.foldMark){
-    return {html: '<span class="fld">… ' + row.hidden + ' line' + (row.hidden === 1 ? '' : 's') + ' hidden — Tab to open</span>', segs: [], cls: cls + ' fold'};
+    return {html: '<span class="fld">…</span>',
+            segs: [], cls: cls + ' fold' + (row.drawer ? ' drawer-fold' : '')};
   }
   if (row.h){
     cls += ' head h' + Math.min(row.h.level, 6);
@@ -933,20 +966,59 @@ function caretCol(el){ return caretRange(el).start; }
 function setCaret(el, col){ setRange(el, col, col); }
 function ilKey(e){
   const il = e.target;
-  if (e.key === 'Escape'){ e.preventDefault(); commitInsert(); }
-  else if (e.key === 'Enter'){
-    e.preventDefault();
-    if (e.ctrlKey) commitInsert({heading: e.shiftKey ? 'prev' : 'next'});
-    else if (e.shiftKey) commitInsert({shift: true});
-    else commitInsert({split: true});
+  const spec = keySpec(e);
+  const keys = state.keys || DEFAULT_BINDINGS;
+  const hit = id => bindingKeys(keys[id]).has(spec);
+
+  // Slash commands only on an otherwise empty line. A "/" typed anywhere else
+  // (and every backslash) always goes straight into the text as normal.
+  if (state.slash){
+    if (e.key === 'Escape'){ e.preventDefault(); closeSlash(false); return; }
+    if (e.key === 'Enter' || e.key === 'Tab' || e.key === ' '){
+      e.preventDefault();
+      const m = slashMatches()[0];
+      if (m){
+        const literal = '/' + state.slash.q, il = state.il;
+        closeSlash(false);
+        openDatePicker(m.kind, il, literal);
+      } else closeSlash(true);
+      return;
+    }
+    if (e.key === 'Backspace'){
+      e.preventDefault();
+      if (!state.slash.q){ closeSlash(false); return; }
+      state.slash.q = state.slash.q.slice(0, -1);
+      if (!state.slash.q) closeSlash(true); else renderSlashMenu();
+      return;
+    }
+    if (/^[A-Za-z]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey){
+      e.preventDefault();
+      state.slash.q += e.key.toLowerCase();
+      renderSlashMenu();
+      return;
+    }
+    closeSlash(true); // any other key (including \ ) keeps the literal "/cmd"
   }
-  else if (e.key === 'ArrowUp'){ e.preventDefault(); const col = caretCol(il); commitInsert(); setCursor(Math.max(0, state.cur.vi - 1), col); openInsert(state.cur.col); }
-  else if (e.key === 'ArrowDown'){ e.preventDefault(); const col = caretCol(il); commitInsert(); setCursor(Math.min(state.visRows.length - 1, state.cur.vi + 1), col); openInsert(state.cur.col); }
-  else if (e.key === 'Backspace' && caretCol(il) === 0){ e.preventDefault(); commitInsert({join:true}); }
-  else if (e.key === 'Tab'){ e.preventDefault(); insertSpacesAtCaret(il, 2); }
-  else if (e.shiftKey && e.key === 'Tab'){ e.preventDefault(); indentLineInsert(il, -2); }
-  else if (e.ctrlKey && (e.key === '>' || e.key === '.')){ e.preventDefault(); indentLineInsert(il, 2); }
-  else if (e.ctrlKey && (e.key === '<' || e.key === ',')){ e.preventDefault(); indentLineInsert(il, -2); }
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey &&
+      /^\s*$/.test(il.textContent)){
+    e.preventDefault();
+    state.slash = {q:'', il};
+    renderSlashMenu();
+    return;
+  }
+
+  if (hit('insertCommit')){ e.preventDefault(); commitInsert(); }
+  else if (hit('insertHeadingNext')){ e.preventDefault(); commitInsert({heading:'next'}); }
+  else if (hit('insertHeadingPrev')){ e.preventDefault(); commitInsert({heading:'prev'}); }
+  else if (hit('insertIndentMore')){ e.preventDefault(); commitInsert({shift:true}); }
+  else if (hit('insertSplit')){ e.preventDefault(); commitInsert({split:true}); }
+  else if (hit('insertUp')){ e.preventDefault(); const col = caretCol(il); commitInsert(); setCursor(Math.max(0, state.cur.vi - 1), col); openInsert(state.cur.col); }
+  else if (hit('insertDown')){ e.preventDefault(); const col = caretCol(il); commitInsert(); setCursor(Math.min(state.visRows.length - 1, state.cur.vi + 1), col); openInsert(state.cur.col); }
+  else if (hit('joinLines') && caretCol(il) === 0){ e.preventDefault(); commitInsert({join:true}); }
+  else if (hit('insertDedent')){ e.preventDefault(); indentLineInsert(il, -2); }
+  else if (hit('insertIndent')){ e.preventDefault(); insertSpacesAtCaret(il, 2); }
+  else if (hit('indentRight')){ e.preventDefault(); indentLineInsert(il, 2); }
+  else if (hit('indentLeft')){ e.preventDefault(); indentLineInsert(il, -2); }
 }
 function insertSpacesAtCaret(il, n){
   const col = caretCol(il);
@@ -1040,6 +1112,8 @@ function commitInsert(opts){
   const il = state.il;
   if (!il) return;
   state.il = null;
+  if (state.slash){ state.slash = null; const sm = $('slashMenu'); if (sm) sm.classList.add('hidden'); }
+  if (state.datePick) closeDatePicker(false, false);
   il.onkeydown = null;
   const f = currentFile();
   const row = state.visRows[state.cur.vi];
@@ -1168,15 +1242,40 @@ function newLineAbove(){
   setCursor(viForLine(no), 0);
   openInsert(0);
 }
+function rebuildVisibleRows(f){
+  state.visRows = buildVisRows(f);
+  state.rendered = {i0:-1, i1:-1};
+}
 function cycleFoldAtCursor(){
   const f = currentFile();
+  const row = state.visRows[state.cur.vi];
+  // Tab on a folded drawer's ellipsis row reopens it.
+  if (row && row.drawer && row.drawerFor){
+    const owner = row.drawerFor;
+    setDrawerFold(f, owner, 0);
+    clearSelection();
+    rebuildVisibleRows(f);
+    setCursor(viForLine(owner.propsStartLine), 0);
+    paintBuffer(); updateStatus(); return;
+  }
+  // Tab on a line inside a property drawer (including :PROPERTIES:) folds it.
+  const no = curLineNo();
+  const owner = f.parsed.lineHead[no];
+  if (owner && owner.propsStartLine != null && no >= owner.propsStartLine && no <= owner.propsEndLine){
+    setDrawerFold(f, owner, 1);
+    clearSelection();
+    rebuildVisibleRows(f);
+    let vi = state.visRows.findIndex(r => r.drawer && r.no === owner.propsStartLine);
+    if (vi < 0) vi = viForLine(owner.startLine);
+    setCursor(Math.max(0, vi), 0);
+    paintBuffer(); updateStatus(); return;
+  }
   const h = headingAtCursor();
   if (!h) return;
   const st = (getFold(f, h) + 1) % 3;
   setFold(f, h, st);
   clearSelection(); // a lingering text selection can look like a stuck highlight
-  state.visRows = buildVisRows(f);
-  state.rendered = {i0:-1, i1:-1};
+  rebuildVisibleRows(f);
   const vi = viForLine(h.startLine);
   if (st === 2) setCursor(Math.min(vi + 1, state.visRows.length - 1), 0);
   else setCursor(vi, state.cur.col);
@@ -1276,53 +1375,552 @@ function jumpMatch(dir){
   toast('No match for “' + q + '”');
 }
 
-/* ---------- normal-mode key dispatch ---------- */
+/* ---------- agenda: SCHEDULED / DEADLINE across all files ---------- */
+const WDAY = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+function dayKey(d){
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function parseStamp(str){
+  const m = /^(\d{4})-(\d{2})-(\d{2})(.*)$/.exec(String(str || '').trim());
+  if (!m) return null;
+  const y = +m[1], mo = +m[2] - 1, d = +m[3];
+  const date = new Date(y, mo, d);
+  if (date.getFullYear() !== y || date.getMonth() !== mo || date.getDate() !== d) return null;
+  const rest = m[4] || '';
+  const tm = /\b(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?/.exec(rest);
+  const rp = /(?:^|\s)([+.]{1,2}\d+[dwmy])\b/.exec(rest);
+  return {
+    date,
+    stamp: m[1] + '-' + m[2] + '-' + m[3] + ' ' + WDAY[date.getDay()],
+    time: tm ? tm[1].padStart(2,'0') + ':' + tm[2] + (tm[3] ? '-' + tm[3].padStart(2,'0') + ':' + tm[4] : '') : '',
+    repeater: rp ? rp[1] : ''
+  };
+}
+function addRepeat(date, spec){
+  const m = /(\d+)([dwmy])$/.exec(spec || '');
+  if (!m) return null;
+  const n = +m[1], out = new Date(date.getTime());
+  if (m[2] === 'd') out.setDate(out.getDate() + n);
+  else if (m[2] === 'w') out.setDate(out.getDate() + n * 7);
+  else if (m[2] === 'm') out.setMonth(out.getMonth() + n);
+  else out.setFullYear(out.getFullYear() + n);
+  return out;
+}
+function startOfWeek(d){
+  const out = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  out.setDate(out.getDate() - ((out.getDay() + 6) % 7)); // Monday
+  return out;
+}
+function collectAgenda(){
+  const out = [];
+  for (let fi = 0; fi < state.files.length; fi++){
+    const f = state.files[fi], lines = f.parsed.lines;
+    for (let i = 0; i < lines.length; i++){
+      const m = /^\s*(SCHEDULED|DEADLINE):\s*<([^>]+)>/.exec(lines[i]);
+      if (!m) continue;
+      const p = parseStamp(m[2]); if (!p) continue;
+      const h = f.parsed.lineHead[i] || null;
+      out.push({fileIdx:fi, file:f.name, line:i, h, key:h ? h.key : '',
+        title:h ? h.title : lines[i].trim(), todo:h ? h.todo : '', priority:h ? h.priority : '',
+        kind:m[1], date:p.date, stamp:p.stamp, time:p.time, repeater:p.repeater});
+    }
+  }
+  return out;
+}
+function agDayLabel(d){
+  return WDAY[d.getDay()] + ' ' + d.getDate() + ' ' +
+    d.toLocaleString('en', {month:'short'}) + ' ' + d.getFullYear();
+}
+function agRowHtml(it){
+  let s = '<span class="ag-kind ' + (it.kind === 'DEADLINE' ? 'due' : 'sched') + '">' +
+          (it.kind === 'DEADLINE' ? 'DUE' : 'SCH') + '</span>';
+  if (it.todo) s += '<span class="kw ' + esc(it.todo) + '">' + esc(it.todo) + '</span>';
+  if (it.priority) s += '<span class="prio ' + it.priority + '">[' + it.priority + ']</span>';
+  s += '<span class="ag-title">' + esc(it.title) + '</span>';
+  let meta = it.file + (it.time ? ' · ' + it.time : '') + (it.repeater ? ' · ' + it.repeater : '');
+  if (it.recurring) meta += ' · recurring';
+  s += '<span class="ag-meta">' + esc(meta) + '</span>';
+  return '<div class="ag-row" data-fi="' + it.fileIdx + '" data-line="' + it.line +
+         '" data-key="' + esc(it.key) + '">' + s + '</div>';
+}
+function agHighlight(){
+  const rows = state.agenda.rows;
+  for (let i = 0; i < rows.length; i++) rows[i].el.classList.toggle('sel', i === state.agenda.sel);
+  const cur = rows[state.agenda.sel];
+  if (cur && cur.el.scrollIntoView) cur.el.scrollIntoView({block:'nearest'});
+}
+function renderAgenda(){
+  const body = $('agBody'); if (!body) return;
+  const start = state.agenda.week || (state.agenda.week = startOfWeek(new Date()));
+  const days = [];
+  for (let i = 0; i < 7; i++){ const d = new Date(start); d.setDate(start.getDate() + i); days.push(d); }
+  const end = new Date(days[6]); end.setDate(days[6].getDate() + 1);
+  const todayKey = dayKey(new Date());
+  const buckets = days.map(() => []), overdue = [], later = [];
+  for (const it of collectAgenda()){
+    const occ = [new Date(it.date)];
+    if (it.repeater){
+      let cur = it.date, guard = 0;
+      while (guard++ < 80){
+        const nd = addRepeat(cur, it.repeater);
+        if (!nd || nd <= cur) break;
+        cur = nd;
+        if (cur >= end) break;
+        occ.push(new Date(cur));
+      }
+    }
+    let placed = false;
+    for (const o of occ){
+      const idx = days.findIndex(x => dayKey(x) === dayKey(o));
+      if (idx >= 0){
+        buckets[idx].push(Object.assign({}, it,
+          {date:o, stamp:dayKey(o) + ' ' + WDAY[o.getDay()], recurring:occ.length > 1}));
+        placed = true;
+      }
+    }
+    if (!placed){
+      if (it.date < start) overdue.push(it);
+      else if (it.date >= end) later.push(it);
+    }
+  }
+  const groups = [];
+  if (overdue.length) groups.push({label:'Overdue & earlier', items:overdue, cls:'overdue'});
+  for (let i = 0; i < 7; i++) groups.push({
+    label: WDAY[days[i].getDay()] + ' ' + agDayLabel(days[i]).slice(WDAY[days[i].getDay()].length + 1),
+    items: buckets[i], cls: dayKey(days[i]) === todayKey ? 'today' : ''
+  });
+  if (later.length) groups.push({label:'Later', items:later.slice(0, 60), cls:''});
+
+  body.innerHTML = '';
+  const rows = [];
+  for (const g of groups){
+    const sec = document.createElement('div');
+    sec.className = 'ag-day' + (g.cls ? ' ' + g.cls : '');
+    const head = document.createElement('div');
+    head.className = 'ag-day-h';
+    head.innerHTML = '<span>' + esc(g.label) + '</span>' +
+      (g.cls === 'today' ? '<span class="ag-today">TODAY</span>' : '') +
+      '<span class="ag-cnt">' + g.items.length + '</span>';
+    sec.appendChild(head);
+    if (!g.items.length){
+      const none = document.createElement('div'); none.className = 'ag-none';
+      none.textContent = '—'; sec.appendChild(none);
+    }
+    for (const it of g.items){
+      const tmp = document.createElement('div'); tmp.innerHTML = agRowHtml(it);
+      const row = tmp.firstChild;
+      row.onclick = () => jumpAgendaItem(it);
+      sec.appendChild(row); rows.push({el:row, it});
+    }
+    body.appendChild(sec);
+  }
+  state.agenda.rows = rows;
+  state.agenda.sel = Math.min(state.agenda.sel, Math.max(0, rows.length - 1));
+  agHighlight();
+  const total = collectAgenda().length;
+  $('agRange').innerHTML = 'Week of <b>' + esc(agDayLabel(days[0])) + '</b> — ' +
+    esc(agDayLabel(days[6])) + ' <span class="ag-count">' + total + ' dated item' +
+    (total === 1 ? '' : 's') + '</span>';
+}
+function openAgenda(){
+  clearSeq();
+  state.agenda.week = startOfWeek(new Date());
+  state.agenda.sel = 0;
+  renderAgenda();
+  $('agendaModal').classList.add('open');
+}
+function closeAgenda(){
+  $('agendaModal').classList.remove('open');
+  state.agenda.rows = [];
+  state.bufActive = true;
+}
+function shiftAgendaWeek(n){
+  state.agenda.week.setDate(state.agenda.week.getDate() + n * 7);
+  state.agenda.sel = 0;
+  renderAgenda();
+}
+function jumpAgendaItem(it){
+  if (!it) return;
+  closeAgenda();
+  openFile(it.fileIdx);
+  const h = findHeading(currentFile(), it.key);
+  jumpToLine(it.line, h || null);
+  toast('Opened ' + it.file + (h ? ' → ' + h.title : ''));
+}
+function agendaKey(e){
+  const spec = keySpec(e), keys = state.keys || DEFAULT_BINDINGS;
+  const rows = state.agenda.rows;
+  const hit = id => bindingKeys(keys[id]).has(spec);
+  if (hit('up') || e.key === 'ArrowUp'){ e.preventDefault(); state.agenda.sel = Math.max(0, state.agenda.sel-1); agHighlight(); return; }
+  if (hit('down') || e.key === 'ArrowDown'){ e.preventDefault(); state.agenda.sel = Math.min(rows.length-1, state.agenda.sel+1); agHighlight(); return; }
+  if (e.key === 'Enter'){ e.preventDefault(); jumpAgendaItem(rows[state.agenda.sel] && rows[state.agenda.sel].it); return; }
+  if (e.key === 'q' || e.key === 'Escape'){ e.preventDefault(); closeAgenda(); return; }
+  if (e.key === 'h' || e.key === 'ArrowLeft'){ e.preventDefault(); shiftAgendaWeek(-1); return; }
+  if (e.key === 'l' || e.key === 'ArrowRight'){ e.preventDefault(); shiftAgendaWeek(1); return; }
+  if (e.key === 't'){ e.preventDefault(); state.agenda.week = startOfWeek(new Date()); state.agenda.sel = 0; renderAgenda(); return; }
+  if (e.key === 'r'){ e.preventDefault(); renderAgenda(); return; }
+}
+
+/* ---------- insert-mode slash commands (never hijack normal typing) ---------- */
+const SLASH_CMDS = [
+  {names:['sched','schedule'], label:'Insert SCHEDULED: pick a date', kind:'SCHEDULED'},
+  {names:['deadline','due','dl'], label:'Insert DEADLINE: pick a date', kind:'DEADLINE'}
+];
+function slashMatches(){
+  const q = (state.slash ? state.slash.q : '').toLowerCase();
+  return SLASH_CMDS.filter(c => c.names.some(n => n.indexOf(q) === 0));
+}
+function renderSlashMenu(){
+  const menu = $('slashMenu'); if (!menu) return;
+  const s = state.slash;
+  if (!s){ menu.classList.add('hidden'); return; }
+  const ms = slashMatches();
+  menu.innerHTML = ms.length
+    ? ms.map((c,i) => '<div class="slash-item' + (i === 0 ? ' active' : '') +
+        '"><span class="slash-cmd">/' + esc(c.names[0]) + '</span><span class="slash-desc">' +
+        esc(c.label) + '</span></div>').join('')
+    : '<div class="slash-none">No match — Esc keeps the literal text</div>';
+  menu.classList.remove('hidden');
+  const r = s.il.getBoundingClientRect();
+  menu.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 290)) + 'px';
+  menu.style.top = Math.max(4, Math.min(r.bottom + 5, window.innerHeight - 120)) + 'px';
+}
+function closeSlash(literal){
+  const s = state.slash; if (!s) return;
+  state.slash = null;
+  const menu = $('slashMenu'); if (menu) menu.classList.add('hidden');
+  if (literal) insertRawAtCaret(s.il, '/' + s.q);
+}
+function insertRawAtCaret(il, text){
+  const col = caretCol(il), s = il.textContent;
+  il.textContent = s.slice(0, col) + text + s.slice(col);
+  setCaret(il, col + text.length);
+  liveRender(il);
+}
+function insertPlanLine(kind, d){
+  const il = state.il; if (!il) return;
+  d = d || new Date();
+  const text = kind + ': <' + dayKey(d) + ' ' + WDAY[d.getDay()] + '>';
+  const col = caretCol(il), s = il.textContent;
+  const before = s.slice(0, col), lead = /^\s*$/.test(before) ? before : '';
+  il.textContent = lead + text + s.slice(col);
+  setCaret(il, (lead + text).length);
+  liveRender(il);
+}
+
+/* Slash-command date picker: navigate with the user's own movement bindings.
+   Enter accepts the highlighted date (today is highlighted on open); Esc keeps
+   the literal "/cmd" text. */
+function dpShiftDays(d, n){
+  const out = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  out.setDate(out.getDate() + n);
+  return out;
+}
+function dpShiftMonths(d, n){
+  const day = d.getDate();
+  const out = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  const dim = new Date(out.getFullYear(), out.getMonth() + 1, 0).getDate();
+  out.setDate(Math.min(day, dim));
+  return out;
+}
+function dpSame(a, b){ return dayKey(a) === dayKey(b); }
+function dpBoundLabel(id){
+  const raw = String((state.keys || DEFAULT_BINDINGS)[id] || '').trim().split(/\s+/)[0] || '?';
+  return raw === 'Space' ? '␣' : raw;
+}
+function openDatePicker(kind, il, literal){
+  if (!il) return;
+  state.datePick = {kind, il, literal, date:new Date()};
+  renderDatePicker();
+  $('datePickModal').classList.add('open');
+}
+function renderDatePicker(){
+  const dp = state.datePick; if (!dp) return;
+  const d = dp.date, today = new Date();
+  $('dpTitle').textContent = (dp.kind === 'DEADLINE' ? 'DEADLINE' : 'SCHEDULED') + ' · choose a date';
+  $('dpSelected').innerHTML = '<b>' + esc(agDayLabel(d)) + '</b>' +
+    (dpSame(d, today) ? ' <span class="dp-today">TODAY</span>' : '');
+  const dow = ['M','T','W','T','F','S','S'];
+  let html = dow.map(x => '<div class="dp-dow">' + x + '</div>').join('');
+  const first = new Date(d.getFullYear(), d.getMonth(), 1);
+  const lead = (first.getDay() + 6) % 7; // Monday-first grid
+  for (let i = 0; i < lead; i++) html += '<div class="dp-day blank"></div>';
+  const dim = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+  for (let day = 1; day <= dim; day++){
+    const cd = new Date(d.getFullYear(), d.getMonth(), day);
+    let cls = 'dp-day';
+    if (dpSame(cd, today)) cls += ' today';
+    if (dpSame(cd, d)) cls += ' sel';
+    html += '<div class="' + cls + '" data-day="' + day + '">' + day + '</div>';
+  }
+  const cal = $('dpCal');
+  cal.innerHTML = html;
+  cal.querySelectorAll('.dp-day[data-day]').forEach(el => {
+    el.onclick = () => {
+      dp.date = new Date(d.getFullYear(), d.getMonth(), parseInt(el.dataset.day, 10));
+      acceptDatePicker();
+    };
+  });
+  $('dpHelp').innerHTML =
+    '<span class="kbd">' + esc(dpBoundLabel('up')) + '</span>/' +
+    '<span class="kbd">' + esc(dpBoundLabel('down')) + '</span> ±week · ' +
+    '<span class="kbd">' + esc(dpBoundLabel('left')) + '</span>/' +
+    '<span class="kbd">' + esc(dpBoundLabel('right')) + '</span> ±day · ' +
+    '<span class="kbd">Enter</span> accept · <span class="kbd">Esc</span> keep literal';
+}
+function closeDatePicker(literal, focus){
+  const dp = state.datePick; if (!dp) return;
+  state.datePick = null;
+  $('datePickModal').classList.remove('open');
+  if (literal) insertRawAtCaret(dp.il, dp.literal || '/' + dp.kind.toLowerCase());
+  if (focus && dp.il && document.contains(dp.il)){
+    dp.il.focus();
+    setCaret(dp.il, dp.il.textContent.length);
+  }
+}
+function acceptDatePicker(){
+  const dp = state.datePick; if (!dp) return;
+  const chosen = new Date(dp.date);
+  closeDatePicker(false, true);
+  insertPlanLine(dp.kind, chosen);
+  toast((dp.kind === 'DEADLINE' ? 'Deadline' : 'Scheduled') + ' set to ' + agDayLabel(chosen));
+}
+function datePickerKey(e){
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') return; // let Ctrl+S save
+  const keys = state.keys || DEFAULT_BINDINGS;
+  const spec = keySpec(e);
+  const hit = id => bindingKeys(keys[id]).has(spec);
+  if (e.key === 'Escape'){ e.preventDefault(); closeDatePicker(true, true); return; }
+  if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); acceptDatePicker(); return; }
+  if (hit('up')){ e.preventDefault(); state.datePick.date = dpShiftDays(state.datePick.date, -7); renderDatePicker(); return; }
+  if (hit('down')){ e.preventDefault(); state.datePick.date = dpShiftDays(state.datePick.date, 7); renderDatePicker(); return; }
+  if (hit('left')){ e.preventDefault(); state.datePick.date = dpShiftDays(state.datePick.date, -1); renderDatePicker(); return; }
+  if (hit('right')){ e.preventDefault(); state.datePick.date = dpShiftDays(state.datePick.date, 1); renderDatePicker(); return; }
+  e.preventDefault(); // swallow everything else while the picker owns the keyboard
+}
+
+/* ---------- customizable key bindings ----------
+   Each command maps to one or more key specs, e.g. "j ArrowDown" or "Ctrl+>".
+   Defaults mirror the original keymap; users can change any of them in Options. */
+const DEFAULT_BINDINGS = {
+  down:'j ArrowDown', up:'k ArrowUp', left:'h ArrowLeft', right:'l ArrowRight',
+  nextLine:'Enter', lineStart:'0', firstNonSpace:'^', lineEnd:'$',
+  topBuffer:'g', bottomBuffer:'G',
+  insert:'i', append:'a', appendEnd:'A', insertFirst:'I',
+  newLineBelow:'o', newLineAbove:'O',
+  cycleTodo:'t', cycleFold:'Tab', deleteChar:'x', toggleCheckbox:'Space',
+  search:'/', nextMatch:'n', prevMatch:'N', undo:'u', refile:'R',
+  togglePreview:'z', agenda:'o a', pageDown:'PageDown', pageUp:'PageUp',
+  pageDownCtrl:'Ctrl+f', pageUpCtrl:'Ctrl+b', halfDown:'Ctrl+d', halfUp:'Ctrl+u',
+  demote:'Ctrl+>', promote:'Ctrl+<',
+  insertCommit:'Esc', insertSplit:'Enter', insertHeadingNext:'Ctrl+Enter',
+  insertHeadingPrev:'Ctrl+Shift+Enter', insertIndentMore:'Shift+Enter',
+  insertUp:'ArrowUp', insertDown:'ArrowDown', joinLines:'Backspace',
+  insertIndent:'Tab', insertDedent:'Shift+Tab', indentRight:'Ctrl+>', indentLeft:'Ctrl+<'
+};
+/* id, label, default binding — order controls the Options list */
+const KEY_COMMANDS = [
+  ['down','Move down','j ArrowDown'], ['up','Move up','k ArrowUp'],
+  ['left','Move left','h ArrowLeft'], ['right','Move right','l ArrowRight'],
+  ['nextLine','Next line (normal)','Enter'], ['lineStart','Line start','0'],
+  ['firstNonSpace','First non-space','^'], ['lineEnd','Line end','$'],
+  ['topBuffer','Buffer top (gg)','g'], ['bottomBuffer','Buffer bottom','G'],
+  ['insert','Insert at cursor','i'], ['append','Append after cursor','a'],
+  ['appendEnd','Append at line end','A'], ['insertFirst','Insert at first non-space','I'],
+  ['newLineBelow','New line below (insert)','o'], ['newLineAbove','New line above (insert)','O'],
+  ['cycleTodo','Cycle TODO','t'], ['cycleFold','Cycle fold / toggle drawer','Tab'],
+  ['deleteChar','Delete character','x'], ['toggleCheckbox','Toggle checkbox','Space'],
+  ['search','Search buffer','/'], ['nextMatch','Next match','n'], ['prevMatch','Previous match','N'],
+  ['undo','Undo','u'], ['refile','Refile subtree','R'], ['togglePreview','Toggle preview pane','z'],
+  ['agenda','Open agenda (o a)','o a'],
+  ['pageDown','Page down','PageDown'], ['pageUp','Page up','PageUp'],
+  ['pageDownCtrl','Page down (Ctrl)','Ctrl+f'], ['pageUpCtrl','Page up (Ctrl)','Ctrl+b'],
+  ['halfDown','Half page down','Ctrl+d'], ['halfUp','Half page up','Ctrl+u'],
+  ['demote','Demote subtree','Ctrl+>'], ['promote','Promote subtree','Ctrl+<'],
+  ['insertCommit','Insert: commit','Esc'], ['insertSplit','Insert: split line','Enter'],
+  ['insertHeadingNext','Insert: deeper heading','Ctrl+Enter'],
+  ['insertHeadingPrev','Insert: previous-level heading','Ctrl+Shift+Enter'],
+  ['insertIndentMore','Insert: same item, deeper','Shift+Enter'],
+  ['insertUp','Insert: previous line','ArrowUp'], ['insertDown','Insert: next line','ArrowDown'],
+  ['joinLines','Insert: join with previous','Backspace'],
+  ['insertIndent','Insert: indent','Tab'], ['insertDedent','Insert: dedent','Shift+Tab'],
+  ['indentRight','Insert: indent line','Ctrl+>'], ['indentLeft','Insert: dedent line','Ctrl+<']
+];
+function keySpec(e){
+  let k = e.key;
+  if (k === ' ') k = 'Space';
+  else if (k === 'Escape') k = 'Esc';
+  let out = '';
+  if (e.ctrlKey) out += 'Ctrl+';
+  if (e.metaKey) out += 'Meta+';
+  if (e.altKey) out += 'Alt+';
+  // A single letter already carries its shift state in its case, so don't
+  // prefix Shift+ as well — otherwise default uppercase bindings never match.
+  if (e.shiftKey && !/^[A-Za-z]$/.test(k)) out += 'Shift+';
+  return out + k;
+}
+function bindingKeys(specStr){
+  const out = new Set();
+  for (const raw of String(specStr || '').split(/[\s,]+/).filter(Boolean)){
+    const alts = new Set([raw]);
+    if (raw.endsWith('>')) alts.add(raw.slice(0, -1) + '.');
+    if (raw.endsWith('<')) alts.add(raw.slice(0, -1) + ',');
+    for (const a of alts){
+      out.add(a);
+      const i = a.lastIndexOf('+');
+      const head = i === -1 ? '' : a.slice(0, i + 1);
+      const key = i === -1 ? a : a.slice(i + 1);
+      if (key.length === 1 && !/[A-Za-z0-9]/.test(key)){
+        out.add(head + 'Shift+' + key);
+        out.add((head.startsWith('Shift+') ? head.slice(6) : head) + key);
+      }
+    }
+  }
+  return out;
+}
+function loadKeys(){
+  state.keys = Object.assign({}, DEFAULT_BINDINGS);
+  const s = storage();
+  if (!s) return;
+  try {
+    const saved = JSON.parse(s.getItem('orglite.keys') || 'null');
+    if (saved && typeof saved === 'object') Object.assign(state.keys, saved);
+  } catch(e){}
+}
+function saveKeys(){
+  const s = storage(); if (!s) return;
+  try { s.setItem('orglite.keys', JSON.stringify(state.keys)); } catch(e){}
+}
+function renderKeyList(){
+  const host = $('keyList'); if (!host) return;
+  host.innerHTML = '';
+  for (const [id, label, def] of KEY_COMMANDS){
+    const row = document.createElement('div');
+    row.className = 'key-row';
+    const lab = document.createElement('span');
+    lab.className = 'key-label'; lab.textContent = label;
+    const btn = document.createElement('button');
+    btn.className = 'keycap' + (state.capturing === id ? ' capturing' : '');
+    btn.dataset.cmd = id;
+    btn.title = 'Click, then press the new key combination (Esc cancels)';
+    btn.textContent = state.capturing === id ? 'press key…' : (state.keys[id] || def);
+    btn.onclick = () => { state.capturing = id; renderKeyList(); };
+    row.appendChild(lab); row.appendChild(btn);
+    host.appendChild(row);
+  }
+}
+/* Fit every binding without scrollbars: use the fewest columns whose rows fit
+   the available height. Called when the modal opens and when it is resized. */
+function fitKeyColumns(){
+  const list = $('keyList'); if (!list) return;
+  const modal = list.closest('.modal'); if (!modal) return;
+  const body = list.parentElement;
+  const note = body.querySelector('.empty-note');
+  const row = list.firstElementChild;
+  const maxH = parseFloat(getComputedStyle(modal).maxHeight) || (window.innerHeight - 32);
+  const h3 = modal.querySelector('h3'), foot = modal.querySelector('.mfoot');
+  const bs = getComputedStyle(body);
+  const pad = (parseFloat(bs.paddingTop) || 0) + (parseFloat(bs.paddingBottom) || 0);
+  const noteH = note ? note.offsetHeight + (parseFloat(getComputedStyle(note).marginBottom) || 0) : 0;
+  const rowH = row ? row.offsetHeight : 28;
+  const gap = parseFloat(getComputedStyle(list).rowGap) || 0;
+  const avail = maxH - (h3 ? h3.offsetHeight : 0) - (foot ? foot.offsetHeight : 0) - pad - noteH - 2;
+  const perCol = Math.max(1, Math.floor(avail / (rowH + gap)));
+  const cols = Math.max(1, Math.min(4, Math.ceil(KEY_COMMANDS.length / perCol)));
+  list.style.gridTemplateColumns = 'repeat(' + cols + ',minmax(0,1fr))';
+}
+const KEY_ACTIONS = {
+  down: () => setCursor(state.cur.vi + 1, state.cur.col),
+  up: () => setCursor(state.cur.vi - 1, state.cur.col),
+  left: () => setCursor(state.cur.vi, state.cur.col - 1),
+  right: () => setCursor(state.cur.vi, state.cur.col + 1),
+  nextLine: () => setCursor(state.cur.vi + 1, state.cur.col),
+  lineStart: () => setCursor(state.cur.vi, 0),
+  firstNonSpace: () => { const t = curLineText(); const nz = t.search(/\S/); setCursor(state.cur.vi, nz === -1 ? 0 : nz); },
+  lineEnd: () => setCursor(state.cur.vi, curLineText().length),
+  topBuffer: () => { if (state.gg){ state.gg = false; setCursor(0, 0); } else { state.gg = true; setTimeout(() => { state.gg = false; }, 600); } },
+  bottomBuffer: () => setCursor(state.visRows.length - 1, 0),
+  insert: () => openInsert(state.cur.col),
+  append: () => openInsert(Math.min(state.cur.col + 1, curLineText().length)),
+  appendEnd: () => openInsert(curLineText().length),
+  insertFirst: () => { const t = curLineText(); const nz = t.search(/\S/); openInsert(nz === -1 ? 0 : nz); },
+  newLineBelow: () => newLineBelow(),
+  newLineAbove: () => newLineAbove(),
+  cycleTodo: () => cycleTodo(),
+  cycleFold: () => cycleFoldAtCursor(),
+  deleteChar: () => deleteChar(),
+  toggleCheckbox: () => toggleCheckboxAtCursor(),
+  search: () => openBufferSearch(),
+  nextMatch: () => { if (!state.searchQ) return false; jumpMatch(1); },
+  prevMatch: () => { if (!state.searchQ) return false; jumpMatch(-1); },
+  undo: () => doUndo(),
+  refile: () => refileAtCursor(),
+  togglePreview: () => toggleFocusPane(),
+  agenda: () => openAgenda(),
+  pageDown: () => page(1), pageUp: () => page(-1),
+  pageDownCtrl: () => page(1), pageUpCtrl: () => page(-1),
+  halfDown: () => page(0.5), halfUp: () => page(-0.5),
+  demote: () => shiftSubtree(1), promote: () => shiftSubtree(-1)
+};
+/* Multi-key bindings are opt-in per command so alias lists like
+   "j ArrowDown" stay aliases and never become sequences. */
+const SEQUENCE_IDS = ['agenda'];
+function seqParts(id, keys){ return String((keys || state.keys || DEFAULT_BINDINGS)[id] || '').trim().split(/\s+/).filter(Boolean); }
+function clearSeq(){
+  state.seq = null;
+  if (state.seqTimer){ clearTimeout(state.seqTimer); state.seqTimer = null; }
+}
+function prefixFallback(prefix, keys){
+  for (const id of Object.keys(KEY_ACTIONS)){
+    if (SEQUENCE_IDS.indexOf(id) >= 0) continue;
+    const parts = seqParts(id, keys);
+    if (parts.length === 1 && parts[0] === prefix) return id;
+  }
+  return null;
+}
+function armSeqTimer(){
+  if (state.seqTimer) clearTimeout(state.seqTimer);
+  state.seqTimer = setTimeout(() => {
+    const s = state.seq;
+    clearSeq();
+    if (s && s.fb && KEY_ACTIONS[s.fb]) KEY_ACTIONS[s.fb]();
+  }, 600);
+}
+function runKeyAction(id, e){
+  const r = KEY_ACTIONS[id] && KEY_ACTIONS[id]();
+  if (r === false) return false;
+  if (e) e.preventDefault();
+  return true;
+}
 function handleNormalKey(e){
-  const k = e.key;
-  if (e.ctrlKey){
-    const kl = k.toLowerCase();
-    if (kl === 'f'){ e.preventDefault(); page(1); return true; }
-    if (kl === 'b'){ e.preventDefault(); page(-1); return true; }
-    if (kl === 'd'){ e.preventDefault(); page(0.5); return true; }
-    if (kl === 'u'){ e.preventDefault(); page(-0.5); return true; }
-    if (k === '>' || k === '.'){ e.preventDefault(); shiftSubtree(1); return true; }
-    if (k === '<' || k === ','){ e.preventDefault(); shiftSubtree(-1); return true; }
-    return false;
+  const spec = keySpec(e);
+  const keys = state.keys || DEFAULT_BINDINGS;
+  if (state.seq){
+    if (state.seq.steps[state.seq.i] === spec){
+      state.seq.i++;
+      if (state.seq.i >= state.seq.steps.length){
+        const id = state.seq.id; clearSeq(); return runKeyAction(id, e);
+      }
+      armSeqTimer(); e.preventDefault(); return true;
+    }
+    // Not the continuation: let the first key do its normal job, then replay this one.
+    const fb = state.seq.fb;
+    clearSeq();
+    if (fb) runKeyAction(fb, null);
+    return handleNormalKey(e);
   }
-  switch (k){
-    case 'j': case 'ArrowDown': e.preventDefault(); setCursor(state.cur.vi + 1, state.cur.col); return true;
-    case 'k': case 'ArrowUp': e.preventDefault(); setCursor(state.cur.vi - 1, state.cur.col); return true;
-    case 'h': case 'ArrowLeft': e.preventDefault(); setCursor(state.cur.vi, state.cur.col - 1); return true;
-    case 'l': case 'ArrowRight': e.preventDefault(); setCursor(state.cur.vi, state.cur.col + 1); return true;
-    case 'Enter': e.preventDefault(); setCursor(state.cur.vi + 1, state.cur.col); return true;
-    case '0': e.preventDefault(); setCursor(state.cur.vi, 0); return true;
-    case '^': { e.preventDefault(); const t = curLineText(); const nz = t.search(/\S/); setCursor(state.cur.vi, nz === -1 ? 0 : nz); return true; }
-    case '$': e.preventDefault(); setCursor(state.cur.vi, curLineText().length); return true;
-    case 'g': e.preventDefault();
-      if (state.gg){ state.gg = false; setCursor(0, 0); }
-      else { state.gg = true; setTimeout(() => { state.gg = false; }, 600); }
-      return true;
-    case 'G': e.preventDefault(); setCursor(state.visRows.length - 1, 0); return true;
-    case 'i': e.preventDefault(); openInsert(state.cur.col); return true;
-    case 'a': e.preventDefault(); openInsert(Math.min(state.cur.col + 1, curLineText().length)); return true;
-    case 'A': e.preventDefault(); openInsert(curLineText().length); return true;
-    case 'I': { e.preventDefault(); const t = curLineText(); const nz = t.search(/\S/); openInsert(nz === -1 ? 0 : nz); return true; }
-    case 'o': e.preventDefault(); newLineBelow(); return true;
-    case 'O': e.preventDefault(); newLineAbove(); return true;
-    case 't': e.preventDefault(); cycleTodo(); return true;
-    case 'Tab': e.preventDefault(); cycleFoldAtCursor(); return true;
-    case 'x': e.preventDefault(); deleteChar(); return true;
-    case ' ': e.preventDefault(); toggleCheckboxAtCursor(); return true;
-    case '/': e.preventDefault(); openBufferSearch(); return true;
-    case 'n': if (state.searchQ){ e.preventDefault(); jumpMatch(1); return true; } return false;
-    case 'N': if (state.searchQ){ e.preventDefault(); jumpMatch(-1); return true; } return false;
-    case 'u': e.preventDefault(); doUndo(); return true;
-    case 'R': e.preventDefault(); refileAtCursor(); return true;
-    case 'z': e.preventDefault(); toggleFocusPane(); return true;
-    case 'PageDown': e.preventDefault(); page(1); return true;
-    case 'PageUp': e.preventDefault(); page(-1); return true;
-    default: return false;
+  for (const id of SEQUENCE_IDS){
+    const parts = seqParts(id, keys);
+    if (parts.length > 1 && parts[0] === spec){
+      state.seq = {id, steps:parts.slice(1), i:0, fb:prefixFallback(spec, keys)};
+      armSeqTimer(); e.preventDefault(); return true;
+    }
   }
+  for (const id of Object.keys(KEY_ACTIONS)){
+    if (SEQUENCE_IDS.indexOf(id) >= 0 && seqParts(id, keys).length > 1) continue;
+    if (bindingKeys(keys[id]).has(spec)) return runKeyAction(id, e);
+  }
+  return false;
 }
 /* Demote (+) / promote (-) the whole subtree under the cursor — org's
    org-metaright / org-metaleft, mapped to Ctrl+> / Ctrl+< (CAPS-as-Ctrl friendly). */
@@ -1735,6 +2333,9 @@ function openFile(idx, opts){
   state.rendered = {i0:-1, i1:-1};
   state.cur = {vi: 0, col: 0, mode: 'normal'};
   state.bufActive = true;
+  clearSeq();
+  if (state.slash){ state.slash = null; const sm = $('slashMenu'); if (sm) sm.classList.add('hidden'); }
+  if (state.datePick) closeDatePicker(true, false);
   closeBufferSearch();
   renderFileList();
   paintBuffer();
@@ -1941,6 +2542,7 @@ function renderAll(){
   } else {
     renderBacklinks();
   }
+  if ($('agendaModal') && $('agendaModal').classList.contains('open')) renderAgenda();
   updateStatus();
 }
 
@@ -2023,6 +2625,7 @@ function boot(){
   let theme = 'dark';
   if (s0){ try { theme = s0.getItem('orglite.theme') || 'dark'; } catch(e){} }
   document.documentElement.dataset.theme = theme;
+  loadKeys();
 
   const ls = loadPersisted();
   const storeFiles = (window.__ORGLITE__ && Array.isArray(window.__ORGLITE__.files) && window.__ORGLITE__.files.length)
@@ -2066,7 +2669,7 @@ function boot(){
     const vi = parseInt(rowEl.dataset.i, 10);
     const row = state.visRows[vi];
     if (!row) return;
-    if (row.foldMark){ cycleFoldAtCursor(); return; }
+    if (row.foldMark){ setCursor(vi, 0); cycleFoldAtCursor(); return; }
     const segs = state.rowCache[vi] || [];
     const rect = rowEl.getBoundingClientRect();
     const x = e.clientX - rect.left - (parseFloat(rowEl.style.paddingLeft) || 0);
@@ -2088,15 +2691,21 @@ function boot(){
     openInsert(state.cur.col);
   });
   document.addEventListener('pointerdown', e => {
+    const inDatePick = e.target.closest && e.target.closest('#datePickModal');
+    if (state.datePick && !inDatePick) closeDatePicker(true, false);
     state.bufActive = !!(e.target.closest && e.target.closest('#bufferViewport'));
     if (state.cur.mode === 'insert' && e.target !== state.il && !e.target.closest('#bufferViewport')) commitInsert();
   });
 
   // ---- keys ----
   document.addEventListener('keydown', e => {
+    if (state.capturing) return; // Options is capturing a key binding
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's'){ e.preventDefault(); saveToFile(); return; }
     if (e.key === 'Escape'){
-      $('rfModal').classList.remove('open'); $('helpModal').classList.remove('open'); $('newfileModal').classList.remove('open');
+      $('rfModal').classList.remove('open'); $('helpModal').classList.remove('open');
+      $('newfileModal').classList.remove('open'); $('optionsModal').classList.remove('open');
+      closeAgenda(); clearSeq();
+      state.capturing = null;
       if (!$('bufferSearch').classList.contains('hidden')){ closeBufferSearch(); return; }
       return;
     }
@@ -2134,6 +2743,64 @@ function boot(){
     };
   });
 
+  // ---- key capture for Options (runs before the global key handler) ----
+  document.addEventListener('keydown', e => {
+    if (!state.capturing) return;
+    e.preventDefault(); e.stopPropagation();
+    const spec = keySpec(e);
+    if (spec === 'Esc'){ state.capturing = null; renderKeyList(); return; }
+    state.keys[state.capturing] = spec;
+    state.capturing = null;
+    saveKeys(); renderKeyList();
+  }, true);
+  // Agenda keys are captured before the buffer's normal-mode dispatcher.
+  document.addEventListener('keydown', e => {
+    if (state.capturing) return;
+    if (!$('agendaModal').classList.contains('open')) return;
+    e.preventDefault(); e.stopPropagation();
+    agendaKey(e);
+  }, true);
+  // The date picker owns all keys while it is open (except Ctrl+S), and moves
+  // the highlighted day with the user's own up/down/left/right bindings.
+  document.addEventListener('keydown', e => {
+    if (state.capturing) return;
+    if (!state.datePick || !$('datePickModal').classList.contains('open')) return;
+    e.preventDefault(); e.stopPropagation();
+    datePickerKey(e);
+  }, true);
+  $('btnAgenda').onclick = openAgenda;
+  $('agClose').onclick = closeAgenda;
+  $('agPrev').onclick = () => shiftAgendaWeek(-1);
+  $('agNext').onclick = () => shiftAgendaWeek(1);
+  $('agToday').onclick = () => { state.agenda.week = startOfWeek(new Date()); state.agenda.sel = 0; renderAgenda(); };
+  $('agRefresh').onclick = () => { renderAgenda(); toast('Agenda refreshed'); };
+  $('agendaModal').addEventListener('click', e => {
+    if (e.target === $('agendaModal')) closeAgenda();
+  });
+  $('dpCancel').onclick = () => closeDatePicker(true, true);
+  $('dpToday').onclick = () => { if (state.datePick){ state.datePick.date = new Date(); renderDatePicker(); } };
+  $('dpAccept').onclick = acceptDatePicker;
+  $('dpPrev').onclick = () => { if (state.datePick){ state.datePick.date = dpShiftMonths(state.datePick.date, -1); renderDatePicker(); } };
+  $('dpNext').onclick = () => { if (state.datePick){ state.datePick.date = dpShiftMonths(state.datePick.date, 1); renderDatePicker(); } };
+  $('datePickModal').addEventListener('click', e => {
+    if (e.target === $('datePickModal')) closeDatePicker(true, true);
+  });
+  $('btnOptions').onclick = () => {
+    state.capturing = null; renderKeyList();
+    $('optionsModal').classList.add('open'); fitKeyColumns();
+  };
+  window.addEventListener('resize', () => {
+    if ($('optionsModal').classList.contains('open')) fitKeyColumns();
+  });
+  $('optClose').onclick = () => { state.capturing = null; $('optionsModal').classList.remove('open'); };
+  $('optReset').onclick = () => {
+    state.keys = Object.assign({}, DEFAULT_BINDINGS);
+    saveKeys(); renderKeyList(); toast('Key bindings reset to defaults');
+  };
+  $('optionsModal').addEventListener('click', e => {
+    if (e.target === $('optionsModal')){ state.capturing = null; $('optionsModal').classList.remove('open'); }
+  });
+
   // ---- header actions ----
   $('btnSave').onclick = saveToFile;
   $('btnNew').onclick = newFile;
@@ -2148,7 +2815,7 @@ function boot(){
   };
   $('btnFoldAll').onclick = () => {
     const f = currentFile();
-    for (const h of f.parsed.headings) setFold(f, h, 2);
+    for (const h of f.parsed.headings){ setFold(f, h, 2); setDrawerFold(f, h, 1); }
     state.visRows = buildVisRows(f);
     state.rendered = {i0:-1, i1:-1};
     setCursor(0, 0);
@@ -2156,7 +2823,7 @@ function boot(){
   };
   $('btnUnfoldAll').onclick = () => {
     const f = currentFile();
-    for (const h of f.parsed.headings) setFold(f, h, 0);
+    for (const h of f.parsed.headings){ setFold(f, h, 0); setDrawerFold(f, h, 0); }
     state.visRows = buildVisRows(f);
     state.rendered = {i0:-1, i1:-1};
     paintBuffer();

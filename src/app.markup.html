@@ -22,6 +22,7 @@
       <option value="tokyonight">Theme: Tokyo Night</option>
       <option value="monokai">Theme: Monokai</option>
     </select>
+    <button class="hbtn" id="btnOptions" title="Options — customize key bindings">⚙ Options</button>
     <button class="hbtn" id="btnHelp" title="What is this?">?</button>
   </header>
 
@@ -58,6 +59,7 @@
       <div class="main-toolbar">
         <div class="fname" id="fname">—</div>
         <div class="tb-spacer"></div>
+        <button class="hbtn" id="btnAgenda" title="Open the agenda for scheduled &amp; deadline items (or press o a)">📅 Agenda</button>
         <button class="hbtn" id="btnRefileCur" title="Refile the heading under the cursor (or press R)">⤵ Refile</button>
         <button class="hbtn" id="btnFoldAll" style="font-size:11.5px;padding:3px 9px">Fold all</button>
         <button class="hbtn" id="btnUnfoldAll" style="font-size:11.5px;padding:3px 9px">Unfold all</button>
@@ -131,7 +133,10 @@
         <li>The whole main area is <b>one buffer</b>: fully rendered (org-modern-style bullets, TODO pills, ☐/☑ checkboxes, timestamps, tags) <i>and</i> the editor — no source/view toggle.</li>
         <li>Modal keys: <span class="kbd">j</span>/<span class="kbd">k</span> down/up · <span class="kbd">h</span>/<span class="kbd">l</span> left/right · <span class="kbd">i</span> insert at cursor · <span class="kbd">a</span> append · <span class="kbd">A</span> end of line · <span class="kbd">o</span>/<span class="kbd">O</span> new line below/above · <span class="kbd">Esc</span> back to normal.</li>
         <li>In insert mode: <span class="kbd">Enter</span> keeps the same level &amp; item (splits at the cursor; on a heading the rest becomes a same-level heading, at the end of a heading it indents a body line under it; on a list item it continues the list) · <span class="kbd">Shift+Enter</span> places the same item one indent deeper · <span class="kbd">Ctrl+Enter</span> inserts a heading one level deeper than the current one · <span class="kbd">Ctrl+Shift+Enter</span> inserts a heading at the level of the most previous heading · <span class="kbd">Tab</span> inserts indentation · <span class="kbd">Ctrl+&gt;</span>/<span class="kbd">Ctrl+&lt;</span> indent/dedent the current line (CAPS-as-Ctrl friendly) · <span class="kbd">Backspace</span> at line start joins lines · arrows move across lines. Typing edits the <i>raw</i> org text, and the pretty view re-renders <b>live as you type</b> — close a <code>*bold*</code> and it turns bold, type a heading and its TODO pill and tags appear immediately. Headings can nest to <b>any</b> depth — <code>****** …</code> works, there is no three-level limit</li>
-        <li><span class="kbd">Tab</span> cycles fold (open → children → folded) · <span class="kbd">S-Tab</span> fold all · <span class="kbd">t</span> cycle TODO state · <span class="kbd">space</span> toggle checkbox · <span class="kbd">x</span> delete char · <span class="kbd">u</span> undo.</li><li>Plain lists render org-modern style too: <code>-</code> and <code>+</code> become • bullets, <code>1.</code> numbered items get accent-colored numbers — raw text underneath stays untouched
+        <li><span class="kbd">Tab</span> cycles fold (open → children → folded) · <span class="kbd">S-Tab</span> fold all · <span class="kbd">t</span> cycle TODO state · <span class="kbd">space</span> toggle checkbox · <span class="kbd">x</span> delete char · <span class="kbd">u</span> undo.</li>
+        <li><b>Property drawers:</b> put the cursor on <code>:PROPERTIES:</code> (or any line inside the drawer, e.g. <code>:ID:</code> / <code>:END:</code>) and press <span class="kbd">Tab</span> to fold it to a single <code>…</code>. Press <span class="kbd">Tab</span> on the <code>…</code> (or click it) to unfold. <b>⚙ Options</b> lets you rebind any key — defaults are preserved and can be reset at any time.</li>
+        <li><b>Agenda:</b> press <span class="kbd">o</span> then <span class="kbd">a</span> (or click 📅 Agenda) for a week view of every <code>SCHEDULED:</code> / <code>DEADLINE:</code> item across all files — including repeaters like <code>+1w</code>. Click an entry (or press Enter) to jump straight to its heading. In the agenda, <span class="kbd">j/k</span> move, <span class="kbd">h/l</span> change week, <span class="kbd">t</span> returns to today, <span class="kbd">q</span> closes.</li>
+        <li><b>Slash commands:</b> on an otherwise empty line in insert mode, type <code>/sched</code> or <code>/deadline</code> (<code>/due</code> works too) and press Enter/Space to open a date picker. Today is highlighted — use your <b>Options</b> up/down bindings to move ±1 week, left/right to move ±1 day, then <span class="kbd">Enter</span> to insert the hardcoded plan line (or just press Enter for today). <span class="kbd">Esc</span> keeps the literal text, and a slash typed anywhere else — or any backslash — is always ordinary input.</li><li>Plain lists render org-modern style too: <code>-</code> and <code>+</code> become • bullets, <code>1.</code> numbered items get accent-colored numbers — raw text underneath stays untouched
         <li><span class="kbd">Ctrl+&gt;</span>/<span class="kbd">Ctrl+&lt;</span> in normal mode <b>demote/promote the whole subtree</b> under the cursor (org-metaright / org-metaleft) · <span class="kbd">0</span> <span class="kbd">^</span> <span class="kbd">$</span> line edges · <span class="kbd">gg</span>/<span class="kbd">G</span> top/bottom · <span class="kbd">Ctrl-f/b</span> pages · <span class="kbd">/</span> search buffer · <span class="kbd">n</span>/<span class="kbd">N</span> next/prev match · <span class="kbd">R</span> refile subtree · <span class="kbd">z</span> toggle preview pane</li>
       </ul>
       <h4>Saving (TiddlyWiki-style)</h4>
@@ -158,6 +163,64 @@
       <p style="margin-top:10px;font-size:12px;color:var(--muted)">Notes: in the sandboxed preview, save/download/clipboard may be blocked — open the HTML file directly in your browser for full behavior.</p>
     </div>
     <div class="mfoot"><button class="hbtn primary" id="helpClose">Got it</button></div>
+  </div>
+</div>
+
+<!-- ============ OPTIONS MODAL ============ -->
+<div class="overlay" id="optionsModal">
+  <div class="modal options-modal">
+    <h3>⚙ Options — key bindings</h3>
+    <div class="mbody">
+      <div class="empty-note options-note">Click a key, then press your combo (with Ctrl/Shift/Alt). <span class="kbd">Esc</span> cancels · <b>Reset to defaults</b> restores the original keys · changes save in this browser.</div>
+      <div id="keyList" class="key-list"></div>
+    </div>
+    <div class="mfoot">
+      <button class="hbtn" id="optReset">Reset to defaults</button>
+      <button class="hbtn primary" id="optClose">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AGENDA MODAL ============ -->
+<div class="overlay" id="agendaModal">
+  <div class="modal agenda-modal">
+    <h3>
+      <span>📅 Agenda</span><span class="ag-spacer"></span>
+      <button class="hbtn" id="agPrev" title="Previous week (h)">←</button>
+      <button class="hbtn" id="agToday" title="This week (t)">Today</button>
+      <button class="hbtn" id="agNext" title="Next week (l)">→</button>
+      <button class="hbtn" id="agClose" title="Close (q)">✕</button>
+    </h3>
+    <div class="ag-range" id="agRange"></div>
+    <div class="mbody" id="agBody"></div>
+    <div class="mfoot ag-foot">
+      <span class="ag-help"><b>j/k</b> move · <b>Enter</b> jump to heading · <b>h/l</b> week · <b>t</b> today · <b>q</b> close</span>
+      <button class="hbtn" id="agRefresh">↻ Refresh</button>
+    </div>
+  </div>
+</div>
+
+<!-- insert-mode slash command completer -->
+<div id="slashMenu" class="slash-menu hidden"></div>
+
+<!-- ============ SLASH-COMMAND DATE PICKER ============ -->
+<div class="overlay" id="datePickModal">
+  <div class="modal date-modal">
+    <h3>
+      <span id="dpTitle">SCHEDULED · choose a date</span><span class="dp-spacer"></span>
+      <button class="hbtn" id="dpPrev" title="Previous month">‹</button>
+      <button class="hbtn" id="dpNext" title="Next month">›</button>
+      <button class="hbtn" id="dpCancel" title="Cancel (Esc)">✕</button>
+    </h3>
+    <div class="mbody dp-body">
+      <div class="dp-selected" id="dpSelected"></div>
+      <div class="dp-cal" id="dpCal"></div>
+    </div>
+    <div class="mfoot dp-foot">
+      <span class="dp-help" id="dpHelp"></span>
+      <button class="hbtn" id="dpToday" title="Jump to today">Today</button>
+      <button class="hbtn primary" id="dpAccept" title="Insert this date (Enter)">Insert</button>
+    </div>
   </div>
 </div>
 
